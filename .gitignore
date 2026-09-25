@@ -1,0 +1,8 @@
+/target/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+
+# Local Trace data should never be committed.
+.trace/
