@@ -16,6 +16,16 @@ pub enum ConfigError {
         path: String,
         source: toml::de::Error,
     },
+    #[error("failed to serialize configuration for {path}: {source}")]
+    Serialize {
+        path: String,
+        source: toml::ser::Error,
+    },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +50,19 @@ impl HardwareConfig {
         })?;
 
         toml::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.display().to_string(),
+            source,
+        })
+    }
+
+    pub fn to_file(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        let path = path.as_ref();
+        let text = toml::to_string_pretty(self).map_err(|source| ConfigError::Serialize {
+            path: path.display().to_string(),
+            source,
+        })?;
+
+        std::fs::write(path, text).map_err(|source| ConfigError::Write {
             path: path.display().to_string(),
             source,
         })
