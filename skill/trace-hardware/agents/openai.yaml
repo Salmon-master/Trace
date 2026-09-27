@@ -1,0 +1,3 @@
+interface:
+  display_name: "Trace Hardware"
+  short_description: "Inspect KiCad hardware with Trace"

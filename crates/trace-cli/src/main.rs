@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 use trace_core::cache;
@@ -10,7 +10,7 @@ use trace_core::datasheet::{
 };
 use trace_core::kicad::{parse_kicad_xml, KicadCli};
 use trace_core::project::{discover_kicad_files, find_config};
-use trace_core::ConnectivityGraph;
+use trace_core::{component_pinout, sensor_inputs, signal, ConnectivityGraph};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,8 +19,17 @@ use trace_core::ConnectivityGraph;
     about = "Hardware context for embedded coding agents"
 )]
 struct Cli {
+    /// Select human-readable or machine-readable output.
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -39,10 +48,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show a component, its pinout, and connected nets.
+    Context { reference: String },
+    /// Show the KiCad pinout for one component.
+    Pinout { reference: String },
     /// Show pins connected to a named net.
     Net { name: String },
+    /// Show a named signal and its connected pins.
+    Signal { name: String },
     /// Trace a named net through connected components.
     Trace { name: String },
+    /// Show sensor-header inputs reaching a component through passive parts.
+    SensorRead { reference: String },
     /// Retrieve and convert a component's exact datasheet URL.
     Datasheet {
         reference: String,
@@ -79,6 +96,7 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let json = matches!(cli.format, OutputFormat::Json);
     let current_directory =
         std::env::current_dir().context("could not determine current directory")?;
 
@@ -88,39 +106,61 @@ fn main() -> Result<()> {
             command.print_help()?;
             println!();
         }
-        Some(Commands::Init) => init(&current_directory)?,
-        Some(Commands::Overview) => overview(&current_directory)?,
-        Some(Commands::Components) => components(&current_directory)?,
-        Some(Commands::Nets) => nets(&current_directory)?,
-        Some(Commands::Component { reference, json }) => {
-            component(&current_directory, &reference, json)?
+        Some(Commands::Init) => init(&current_directory, json)?,
+        Some(Commands::Overview) => overview(&current_directory, json)?,
+        Some(Commands::Components) => components(&current_directory, json)?,
+        Some(Commands::Nets) => nets(&current_directory, json)?,
+        Some(Commands::Component { reference, json }) => component(
+            &current_directory,
+            &reference,
+            json || matches!(cli.format, OutputFormat::Json),
+        )?,
+        Some(Commands::Context { reference }) => context(&current_directory, &reference, json)?,
+        Some(Commands::Pinout { reference }) => pinout(&current_directory, &reference, json)?,
+        Some(Commands::Net { name }) => net(&current_directory, &name, false, json)?,
+        Some(Commands::Signal { name }) => signal_command(&current_directory, &name, json)?,
+        Some(Commands::Trace { name }) => net(&current_directory, &name, true, json)?,
+        Some(Commands::SensorRead { reference }) => {
+            sensor_read(&current_directory, &reference, json)?
         }
-        Some(Commands::Net { name }) => net(&current_directory, &name, false)?,
-        Some(Commands::Trace { name }) => net(&current_directory, &name, true)?,
         Some(Commands::Datasheet { reference, refresh }) => {
-            datasheet(&current_directory, &reference, refresh)?
+            datasheet(&current_directory, &reference, refresh, json)?
         }
         Some(Commands::DatasheetSearch {
             reference,
             query,
             context,
             refresh,
-        }) => datasheet_search(&current_directory, &reference, &query, context, refresh)?,
+        }) => datasheet_search(
+            &current_directory,
+            &reference,
+            &query,
+            context,
+            refresh,
+            json,
+        )?,
         Some(Commands::Docs { reference, refresh }) => {
-            docs(&current_directory, &reference, refresh)?
+            docs(&current_directory, &reference, refresh, json)?
         }
         Some(Commands::DocsSearch {
             reference,
             query,
             context,
             refresh,
-        }) => docs_search(&current_directory, &reference, &query, context, refresh)?,
+        }) => docs_search(
+            &current_directory,
+            &reference,
+            &query,
+            context,
+            refresh,
+            json,
+        )?,
     }
 
     Ok(())
 }
 
-fn init(root: &Path) -> Result<()> {
+fn init(root: &Path, json: bool) -> Result<()> {
     let config_path = root.join(CONFIG_FILENAME);
     if config_path.exists() {
         bail!(
@@ -149,6 +189,19 @@ fn init(root: &Path) -> Result<()> {
         .to_file(&config_path)
         .with_context(|| format!("could not create {}", config_path.display()))?;
 
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": config.schema,
+                "operation": "init",
+                "config": config_path,
+                "kicad": config.kicad,
+            })
+        );
+        return Ok(());
+    }
+
     println!("Created {}", config_path.display());
     println!("  schematic = {}", config.kicad.schematic);
     if let Some(project) = config.kicad.project {
@@ -161,8 +214,22 @@ fn init(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn overview(root: &Path) -> Result<()> {
+fn overview(root: &Path, json: bool) -> Result<()> {
     let (graph, cached) = load_graph(root)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "overview",
+                "components": graph.components.len(),
+                "pins": graph.pins.len(),
+                "nets": graph.nets.len(),
+                "graph": if cached { "cache-hit" } else { "generated" },
+            })
+        );
+        return Ok(());
+    }
     println!("Hardware Overview");
     println!("  components: {}", graph.components.len());
     println!("  pins:       {}", graph.pins.len());
@@ -174,8 +241,19 @@ fn overview(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn components(root: &Path) -> Result<()> {
+fn components(root: &Path, json: bool) -> Result<()> {
     let (graph, _) = load_graph(root)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "components",
+                "components": graph.components,
+            })
+        );
+        return Ok(());
+    }
     for component in graph.components {
         println!(
             "{} — {}",
@@ -190,8 +268,28 @@ fn components(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn nets(root: &Path) -> Result<()> {
+fn nets(root: &Path, json: bool) -> Result<()> {
     let (graph, _) = load_graph(root)?;
+    if json {
+        let values = graph
+            .nets
+            .iter()
+            .filter_map(|net| {
+                net.name
+                    .as_ref()
+                    .map(|name| serde_json::json!({ "name": name, "pin_count": net.pins.len() }))
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "nets",
+                "nets": values,
+            })
+        );
+        return Ok(());
+    }
     for net in graph.nets {
         if let Some(name) = net.name {
             println!("{name} ({} pins)", net.pins.len());
@@ -210,7 +308,14 @@ fn component(root: &Path, reference: &str, json: bool) -> Result<()> {
         .with_context(|| format!("component {reference} was not found"))?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(component)?);
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "component",
+                "component": component,
+            })
+        );
     } else {
         println!("Reference: {}", component.reference);
         println!("Value:     {}", component.value);
@@ -231,13 +336,183 @@ fn component(root: &Path, reference: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn net(root: &Path, name: &str, traced: bool) -> Result<()> {
+fn context(root: &Path, reference: &str, json: bool) -> Result<()> {
+    let (graph, _) = load_graph(root)?;
+    let pinout = component_pinout(&graph, reference)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "context",
+                "reference": pinout.component.reference.clone(),
+                "component": pinout.component.clone(),
+                "pins": pinout.pins,
+                "datasheet": pinout.component.datasheet_url.clone(),
+            })
+        );
+        return Ok(());
+    }
+
+    println!("Context: {}", pinout.component.reference);
+    println!("  value: {}", pinout.component.value);
+    if let Some(datasheet) = &pinout.component.datasheet_url {
+        println!("  datasheet: {datasheet}");
+    }
+    println!("  pins: {}", pinout.pins.len());
+    for pin in pinout.pins {
+        let name = pin.name.as_deref().unwrap_or("unnamed");
+        let nets = if pin.nets.is_empty() {
+            "unconnected".to_string()
+        } else {
+            pin.nets.join(", ")
+        };
+        println!("    {} ({name}) -> {nets}", pin.number);
+    }
+    Ok(())
+}
+
+fn pinout(root: &Path, reference: &str, json: bool) -> Result<()> {
+    let (graph, _) = load_graph(root)?;
+    let pinout = component_pinout(&graph, reference)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "pinout",
+                "reference": pinout.component.reference,
+                "pins": pinout.pins,
+            })
+        );
+        return Ok(());
+    }
+
+    println!("Pinout: {}", pinout.component.reference);
+    for pin in pinout.pins {
+        let name = pin.name.as_deref().unwrap_or("unnamed");
+        let nets = if pin.nets.is_empty() {
+            "unconnected".to_string()
+        } else {
+            pin.nets.join(", ")
+        };
+        println!("  {} ({name}) -> {nets}", pin.number);
+    }
+    Ok(())
+}
+
+fn signal_command(root: &Path, name: &str, json: bool) -> Result<()> {
+    let (graph, _) = load_graph(root)?;
+    let signal = signal(&graph, name)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "signal",
+                "signal": signal,
+            })
+        );
+        return Ok(());
+    }
+
+    println!("Signal: {}", signal.name);
+    for pin in signal.pins {
+        match pin.name {
+            Some(name) => println!("  {}.{} ({name})", pin.reference, pin.number),
+            None => println!("  {}.{}", pin.reference, pin.number),
+        }
+    }
+    Ok(())
+}
+
+fn sensor_read(root: &Path, reference: &str, json: bool) -> Result<()> {
+    let (graph, _) = load_graph(root)?;
+    let inputs = sensor_inputs(&graph, reference)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "sensor-read",
+                "target": reference,
+                "inputs": inputs,
+                "interpretation": "Wiring paths only; confirm ADC registers and electrical limits from the datasheet.",
+            })
+        );
+        return Ok(());
+    }
+
+    println!("Sensor inputs: {reference}");
+    if inputs.is_empty() {
+        println!("  no sensor-header inputs found through series resistors");
+        return Ok(());
+    }
+    for input in inputs {
+        let adc = input
+            .adc_channel
+            .as_deref()
+            .unwrap_or("ADC channel unknown");
+        let series = input
+            .series_component
+            .map(|component| format!(" through {}", component.reference))
+            .unwrap_or_default();
+        println!(
+            "  {}.{} ->{} {}.{} ({adc})",
+            input.sensor.reference,
+            input.sensor.number,
+            series,
+            input.target.reference,
+            input.target.number,
+        );
+    }
+    Ok(())
+}
+
+fn net(root: &Path, name: &str, traced: bool, json: bool) -> Result<()> {
     let (graph, _) = load_graph(root)?;
     let net = graph
         .nets
         .iter()
         .find(|net| net.name.as_deref() == Some(name))
         .with_context(|| format!("net {name} was not found"))?;
+
+    let pins = net
+        .pins
+        .iter()
+        .map(|pin_id| {
+            let pin = graph
+                .pins
+                .get(*pin_id)
+                .context("graph contained an invalid pin reference")?;
+            let component = graph
+                .components
+                .get(pin.component)
+                .context("graph contained an invalid component reference")?;
+            Ok(serde_json::json!({
+                "reference": component.reference,
+                "number": pin.number,
+                "name": pin.name,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": if traced { "trace" } else { "net" },
+                "name": name,
+                "pins": pins,
+            })
+        );
+        return Ok(());
+    }
 
     if traced {
         println!("Trace: {name}");
@@ -263,7 +538,7 @@ fn net(root: &Path, name: &str, traced: bool) -> Result<()> {
     Ok(())
 }
 
-fn datasheet(root: &Path, reference: &str, refresh: bool) -> Result<()> {
+fn datasheet(root: &Path, reference: &str, refresh: bool, json: bool) -> Result<()> {
     let (graph, _) = load_graph(root)?;
     let component = graph
         .components
@@ -302,6 +577,19 @@ fn datasheet(root: &Path, reference: &str, refresh: bool) -> Result<()> {
         retrieve_and_parse_candidate(component, exact[0], refresh)?
     };
 
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "datasheet",
+                "reference": component.reference,
+                "document": document_json(&document),
+            })
+        );
+        return Ok(());
+    }
+
     println!("Datasheet: {}", component.reference);
     println!("  type:       {}", document.information.pdf_type);
     println!(
@@ -332,9 +620,25 @@ fn datasheet_search(
     query: &str,
     context: usize,
     refresh: bool,
+    json: bool,
 ) -> Result<()> {
     let document = retrieve_datasheet(root, reference, refresh)?;
     let matches = search_document(&document, query, context)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "datasheet-search",
+                "reference": reference,
+                "pattern": query,
+                "document": document_json(&document),
+                "matches": matches,
+            })
+        );
+        return Ok(());
+    }
 
     println!("Datasheet search: {reference}");
     println!("  pattern: {query}");
@@ -359,9 +663,34 @@ fn datasheet_search(
     Ok(())
 }
 
-fn docs(root: &Path, reference: &str, refresh: bool) -> Result<()> {
+fn docs(root: &Path, reference: &str, refresh: bool, json: bool) -> Result<()> {
     let (component, primary) = retrieve_component_datasheet(root, reference, refresh)?;
     let related = retrieve_related_documents(&component, &primary, refresh)?;
+
+    if json {
+        let related = related
+            .into_iter()
+            .map(|(candidate, document)| {
+                serde_json::json!({
+                    "kind": candidate.kind,
+                    "url": candidate.url,
+                    "discovery_source": candidate.discovery_source,
+                    "document": document_json(&document),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "docs",
+                "reference": reference,
+                "primary": document_json(&primary),
+                "related": related,
+            })
+        );
+        return Ok(());
+    }
 
     println!("Documents: {reference}");
     println!("  primary: {}", primary.markdown.display());
@@ -389,6 +718,7 @@ fn docs_search(
     query: &str,
     context: usize,
     refresh: bool,
+    json: bool,
 ) -> Result<()> {
     let (component, primary) = retrieve_component_datasheet(root, reference, refresh)?;
     let related = retrieve_related_documents(&component, &primary, refresh)?;
@@ -398,6 +728,31 @@ fn docs_search(
             .into_iter()
             .map(|(candidate, document)| (candidate.kind, document)),
     );
+
+    if json {
+        let results = documents
+            .into_iter()
+            .map(|(kind, document)| {
+                let matches = search_document(&document, query, context)?;
+                Ok(serde_json::json!({
+                    "kind": kind,
+                    "document": document_json(&document),
+                    "matches": matches,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "operation": "docs-search",
+                "reference": reference,
+                "pattern": query,
+                "results": results,
+            })
+        );
+        return Ok(());
+    }
 
     println!("Document search: {reference}");
     println!("  pattern: {query}");
@@ -422,6 +777,16 @@ fn docs_search(
     }
 
     Ok(())
+}
+
+fn document_json(document: &trace_core::datasheet::DatasheetDocument) -> serde_json::Value {
+    serde_json::json!({
+        "source_pdf": document.source_pdf,
+        "markdown": document.markdown,
+        "metadata": document.metadata,
+        "information": document.information,
+        "cache_hit": document.cache_hit,
+    })
 }
 
 fn retrieve_datasheet(

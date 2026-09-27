@@ -289,7 +289,7 @@ pub struct RelatedDocumentCandidate {
     pub discovery_source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasheetSearchMatch {
     pub line_number: usize,
     pub line: String,

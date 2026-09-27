@@ -55,6 +55,75 @@ trace net LEFT_GO
 trace trace LEFT_GO
 ```
 
+Read commands also support stable machine-readable output for agents:
+
+```powershell
+trace --format json overview
+trace --format json component U1
+trace --format json net "/PWM left"
+trace --format json docs U1
+trace --format json context U1
+trace --format json pinout U1
+trace --format json signal "/PWM left"
+trace --format json sensor-read U1
+```
+
+JSON document results include the source URL, document type, cache paths,
+resolver, match status, and parser metadata.
+
+The high-level queries are intended for agents: `context` combines component
+metadata and its KiCad pinout, `pinout` shows pins and connected nets, `signal`
+shows the endpoints of a named signal, and `sensor-read` reports sensor-header
+paths through passive components. `sensor-read` is a wiring report, not a
+replacement for checking ADC registers and electrical limits in the datasheet.
+
+The repository includes the `trace-hardware` agent skill under
+`skill/trace-hardware`. Install the CLI locally with:
+
+```powershell
+cargo install --path crates/trace-cli
+```
+
+Release bundles include platform installers under `install/`. On Windows run
+`install.ps1`; on macOS or Linux run `install.sh`. The installers detect
+Codex, Claude Code, and Cursor, then ask which detected agent should receive
+the `trace-hardware` skill:
+
+```powershell
+.\install\install.ps1
+.\install\install.ps1 -ListAgents
+.\install\install.ps1 -Agent codex -Force
+```
+
+```bash
+./install/install.sh
+./install/install.sh --list-agents
+./install/install.sh --agent claude --force
+```
+
+Use `--scope project` to install under the current project's `.codex`,
+`.claude`, or `.cursor` directory. Use `--agent custom --skill-directory
+PATH` for another Agent Skills-compatible tool. The release installer
+expects a prebuilt `trace` or `trace.exe` beside the `skill/trace-hardware`
+directory, so end users do not need the Rust toolchain.
+
+GitHub Releases are generated from version tags by
+`.github/workflows/release.yml`. To publish a release:
+
+```powershell
+git add .
+git commit -m "Prepare release"
+git tag v0.1.0
+git push origin main
+git push origin v0.1.0
+```
+
+The workflow builds Windows, macOS, and Linux bundles, includes the skill and
+platform installer, generates `checksums.txt`, and attaches the artifacts to
+the GitHub Release. GitHub Releases are the initial source of truth; WinGet,
+Homebrew, and Linux package manifests can be added later as wrappers around
+these versioned artifacts.
+
 Trace searches for `kicad-cli` on `PATH` and in common Windows KiCad install
 locations. You can override discovery with `TRACE_KICAD_CLI`.
 

@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build Trace
+        run: cargo build --locked --release --target ${{ matrix.target }} -p trace-cli
+
+      - name: Stage Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "staging/Trace-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path "$staging/skill/trace-hardware" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/install" -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/trace.exe" "$staging/trace.exe"
+          Copy-Item "skill/trace-hardware/*" "$staging/skill/trace-hardware" -Recurse
+          Copy-Item "install/install.ps1" "$staging/install/install.ps1"
+          Compress-Archive -Path "$staging/*" -DestinationPath "Trace-${{ github.ref_name }}-${{ matrix.target }}.zip"
+
+      - name: Stage Unix bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          staging="staging/Trace-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$staging/skill/trace-hardware" "$staging/install"
+          cp "target/${{ matrix.target }}/release/trace" "$staging/trace"
+          cp -R skill/trace-hardware/. "$staging/skill/trace-hardware/"
+          cp install/install.sh "$staging/install/install.sh"
+          chmod +x "$staging/trace" "$staging/install/install.sh"
+          tar -czf "Trace-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" -C staging "Trace-${GITHUB_REF_NAME}-${{ matrix.target }}"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trace-${{ matrix.target }}
+          path: Trace-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum Trace-* > checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
