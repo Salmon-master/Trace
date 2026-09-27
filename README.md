@@ -1,10 +1,62 @@
 # Trace
 
+<img src="assets/trace-mark.png" alt="Trace logo" width="160">
+
 Trace is a local hardware-context layer for embedded coding agents.
 
 The project will turn KiCad schematics and component documentation into reliable,
 queryable context for firmware development. KiCad connectivity and manufacturer
 datasheets remain authoritative; generated summaries and search indexes are caches.
+
+## Install Trace
+
+The easiest way to install Trace is to download the latest platform bundle from
+the [GitHub Releases page](https://github.com/Salmon-master/Trace/releases).
+
+Windows:
+
+1. Download the Windows ZIP and extract it.
+2. Open PowerShell in the extracted directory.
+3. Run:
+
+```powershell
+.\install\install.ps1
+```
+
+macOS or Linux:
+
+1. Download the matching TAR archive and extract it.
+2. Open a terminal in the extracted directory.
+3. Run:
+
+```bash
+./install/install.sh
+```
+
+The installer detects Codex, Claude Code, and Cursor, then asks which agent
+should receive the `trace-hardware` skill. It installs a prebuilt Trace binary,
+so end users do not need Rust. KiCad is still required for schematic parsing.
+
+For an existing checkout, the installer can list detected agents or target one
+explicitly:
+
+```powershell
+.\install\install.ps1 -ListAgents
+.\install\install.ps1 -Agent codex -Force
+```
+
+```bash
+./install/install.sh --list-agents
+./install/install.sh --agent claude --force
+```
+
+Use `--scope project` to install under the current project's `.codex`,
+`.claude`, or `.cursor` directory. Use `--agent custom --skill-directory
+PATH` for another Agent Skills-compatible tool.
+
+The current release flow requires downloading and extracting the platform
+bundle before running its installer. A one-line bootstrap installer and a
+single-file Windows setup executable are planned, but are not available yet.
 
 ## Current status
 
@@ -78,34 +130,13 @@ paths through passive components. `sensor-read` is a wiring report, not a
 replacement for checking ADC registers and electrical limits in the datasheet.
 
 The repository includes the `trace-hardware` agent skill under
-`skill/trace-hardware`. Install the CLI locally with:
+`skill/trace-hardware`. Developers can build and install the CLI locally with:
 
 ```powershell
 cargo install --path crates/trace-cli
 ```
 
-Release bundles include platform installers under `install/`. On Windows run
-`install.ps1`; on macOS or Linux run `install.sh`. The installers detect
-Codex, Claude Code, and Cursor, then ask which detected agent should receive
-the `trace-hardware` skill:
-
-```powershell
-.\install\install.ps1
-.\install\install.ps1 -ListAgents
-.\install\install.ps1 -Agent codex -Force
-```
-
-```bash
-./install/install.sh
-./install/install.sh --list-agents
-./install/install.sh --agent claude --force
-```
-
-Use `--scope project` to install under the current project's `.codex`,
-`.claude`, or `.cursor` directory. Use `--agent custom --skill-directory
-PATH` for another Agent Skills-compatible tool. The release installer
-expects a prebuilt `trace` or `trace.exe` beside the `skill/trace-hardware`
-directory, so end users do not need the Rust toolchain.
+## Publish a release
 
 GitHub Releases are generated from version tags by
 `.github/workflows/release.yml`. To publish a release:
@@ -117,6 +148,11 @@ git tag v0.1.0
 git push origin main
 git push origin v0.1.0
 ```
+
+The workflow runs only for pushed tags beginning with `v`; an ordinary push to
+`main` will not create a release. After pushing the tag, check the `Release`
+workflow in the GitHub Actions tab. A release appears only after the publish
+job completes successfully.
 
 The workflow builds Windows, macOS, and Linux bundles, includes the skill and
 platform installer, generates `checksums.txt`, and attaches the artifacts to
